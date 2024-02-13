@@ -5,6 +5,7 @@ extern char __kernel_base[];
 extern char __stack_top[];
 extern char __bss[], __bss_end[];
 extern char __free_ram[], __free_ram_end[];
+extern char _binary_shell_bin_start[], _binary_shell_bin_size[];
 
 struct process procs[PROCS_MAX];
 struct process *current_proc;
@@ -145,6 +146,10 @@ void kernel_entry(void) {
   );
 }
 
+void user_entry(void) {
+  PANIC("not yet implemented");
+}
+
 __attribute__((naked)) void switch_context(uint32_t *prev_sp,
                                            uint32_t *next_sp) {
   __asm__ __volatile__(
@@ -182,7 +187,7 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
   );
 }
 
-struct process *create_process(uint32_t pc) {
+struct process *create_process(const void *image, size_t image_size) {
   struct process *proc = NULL;
   int i;
   for (i = 0; i < PROCS_MAX; i++) {
@@ -208,13 +213,22 @@ struct process *create_process(uint32_t pc) {
   *--sp = 0;                      // s2
   *--sp = 0;                      // s1
   *--sp = 0;                      // s0
-  *--sp = (uint32_t) pc;          // ra
+  *--sp = (uint32_t) user_entry;  // ra
 
   uint32_t *page_table = (uint32_t *) alloc_pages(1);
 
+  // Kernel pages.
   for (paddr_t paddr = (paddr_t) __kernel_base;
        paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE)
     map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+  
+  // User pages.
+  for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
+    paddr_t page = alloc_pages(1);
+    memcpy((void *) page, image + off, PAGE_SIZE);
+    map_page(page_table, USER_BASE + off, page,
+             PAGE_U | PAGE_R | PAGE_W | PAGE_X);
+  }
 
   proc->pid = i + 1;
   proc->state = PROC_RUNNABLE;
@@ -260,31 +274,6 @@ void handle_trap(struct trap_frame *f) {
   PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
 }
 
-struct process *proc_a;
-struct process *proc_b;
-
-void proc_a_entry(void) {
-  printf("starting proces A\n");
-  while (1) {
-    putchar('A');
-    yield();
-
-    for (int i = 0; i < 30000000; i++)
-      __asm__ __volatile__("nop");
-  }
-}
-
-void proc_b_entry(void) {
-  printf("starting proces B\n");
-  while (1) {
-    putchar('B');
-    yield();
-
-    for (int i = 0; i < 30000000; i++)
-      __asm__ __volatile__("nop");
-  }
-}
-
 void kernel_main(void) {
   memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
 
@@ -292,12 +281,11 @@ void kernel_main(void) {
 
   WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
-  idle_proc = create_process((uint32_t) NULL);
+  idle_proc = create_process(NULL, 0);
   idle_proc->pid = -1;
   current_proc = idle_proc;
 
-  proc_a = create_process((uint32_t) proc_a_entry);
-  proc_b = create_process((uint32_t) proc_b_entry);
+  create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
 
   yield();
   PANIC("switched to idle process");
